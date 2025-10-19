@@ -42,7 +42,7 @@ def get_country_domains():
     return json_data
 
 def main():
-    domain = 'tiktok'
+    domain = 'pinterest'
     common_tlds = ['.com', '.edu', '.net', '.org']
     to_check = []
     block_list = []
