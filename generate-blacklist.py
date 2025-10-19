@@ -25,7 +25,7 @@ signal.signal(signal.SIGINT, handle_sigint)
 
 def domain_resolves(domain):
     """Return (domain, True/False) depending on whether it resolves."""
-    timeout = 0.5
+    timeout = 1
 
     try:
         dns.resolver.resolve(domain, 'A', lifetime=timeout)
@@ -87,8 +87,12 @@ def main():
                 to_check.append(f'{domain}.com.{tld}')
     
     to_check = sorted(to_check)
+    longest = 0
+    max_length = 30
+    for domain in to_check:
+        longest = len(domain) if (len(domain) > longest and len(domain) <= max_length) else longest
 
-    term_width = shutil.get_terminal_size((120, 20)).columns
+    term_width = shutil.get_terminal_size((80, 25)).columns
     bar_width = max(80, term_width - 10)
     results = {}
     start = time.time()
@@ -99,7 +103,7 @@ def main():
             for future in as_completed(futures):
                 d, resolves = future.result()
                 results[d] = resolves
-                pbar.set_description(f'Checking {d:<30.30}')
+                pbar.set_description(f'Checking {d:<{longest}.{longest}}')
                 ok = sum(results.values())
                 pbar.set_postfix(ok=ok, fail=len(results)-ok)
                 pbar.update(1)
