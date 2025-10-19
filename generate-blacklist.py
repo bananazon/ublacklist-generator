@@ -1,30 +1,44 @@
 #!/usr/bin/env python3
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 from pathlib import Path
 from pprint import pprint
-import urllib.error
-import urllib.parse
-import urllib.request
+import argparse
+import dns.resolver
 import json
+import shutil
 import signal
-import socket
 import sys
+import time
+import urllib.request
+
+def raise_error(signum, frame):
+    """This handler will raise an error inside gethostbyname"""
+    raise OSError
 
 def handle_sigint(signum, frame):
     print(f'\nCaught Ctrl+C (signal {signum})')
     sys.exit(0)
 
-def domain_resolves(domain):
-    print(f'Testing domain {domain}')
-    try:
-        socket.gethostbyname(domain)
-        return True
-    except socket.gaierror:
-        return False
-
 signal.signal(signal.SIGINT, handle_sigint)
 
+def domain_resolves(domain):
+    """Return (domain, True/False) depending on whether it resolves."""
+    timeout = 0.5
+
+    try:
+        dns.resolver.resolve(domain, 'A', lifetime=timeout)
+        return domain, True
+    except dns.resolver.NXDOMAIN:
+        return domain, False
+    except dns.resolver.Timeout:
+        return domain, False
+    except Exception:
+        return domain, False
+
 def get_country_domains():
+    """Fetch list of country TLDs from GitHub JSON."""
     url = 'https://raw.githubusercontent.com/samayo/country-json/refs/heads/master/src/country-by-domain-tld.json'
     headers = {
         'Accept': 'application/json',
@@ -41,28 +55,65 @@ def get_country_domains():
 
     return json_data
 
+def generate_ublacklist_entry(domain: str) -> str:
+    """Return a uBlacklist rule for the given domain."""
+    return f'*://*.{domain}/*'
+
 def main():
-    domain = 'pinterest'
-    common_tlds = ['.com', '.edu', '.net', '.org']
-    to_check = []
-    block_list = []
-    
-    for tld in common_tlds:
-        to_check.append(f'{domain}{tld}')
+    parser = argparse.ArgumentParser(
+        prog = 'generate-blacklist',
+        description = 'Generate uBlacklist rules from one of more base domains',
+        formatter_class = argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument('-d', '--domain', action='append', help='Domain to generate rules for, e.g., pinterest', required=True)
+    parser.add_argument('-o', '--outfile', default='uBlacklist.txt', help='Output filename')
+    args = parser.parse_args()
 
     json_data = get_country_domains()
+    output_file = Path(args.outfile)
+    common_tlds = ['com', 'edu', 'net', 'org']
+    to_check = []
 
-    for country in json_data:
-        if 'tld' in country and country['tld'] is not None:
-            tld = country['tld']
-            to_check.append(f'{domain}{tld}')
+    for domain in args.domain:
+        domain = domain.split('.')[0]
+        for tld in common_tlds:
+            to_check.append(f'{domain}.{tld}')
 
-    for item in to_check:
-        if domain_resolves(item):
-            block_list.append(f'*://*.{item}/*')
+        for country in json_data:
+            tld = country.get('tld')
+            if tld:
+                tld = tld.lstrip('.')
+                to_check.append(f'{domain}.{tld}')
+                to_check.append(f'{domain}.com.{tld}')
+    
+    to_check = sorted(to_check)
 
-    for entry in sorted(block_list):
-        print(entry)
+    term_width = shutil.get_terminal_size((120, 20)).columns
+    bar_width = max(80, term_width - 10)
+    results = {}
+    start = time.time()
+
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(domain_resolves, d): d for d in to_check}
+        with tqdm(total=len(to_check), ncols=bar_width, leave=True) as pbar:
+            for future in as_completed(futures):
+                d, resolves = future.result()
+                results[d] = resolves
+                pbar.set_description(f'Checking {d:<30.30}')
+                ok = sum(results.values())
+                pbar.set_postfix(ok=ok, fail=len(results)-ok)
+                pbar.update(1)
+
+    # Build blacklist entries for domains that resolved
+    resolved_domains = [d for d, ok in results.items() if ok]
+    blacklist_entries = [generate_ublacklist_entry(d) for d in resolved_domains]
+
+    # Write them to a file, one per line (no blank lines)
+    output_file.write_text('\n'.join(sorted(blacklist_entries)), encoding='utf-8')
+
+    print(f'\nDone in {time.time() - start:.2f}s')
+    print(f'{len(resolved_domains)} domains resolved.')
+    print(f'uBlacklist file saved to: {output_file}')
 
 if __name__ == '__main__':
     main()
